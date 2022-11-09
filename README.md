@@ -1,4 +1,4 @@
-# Yolov7 + StrongSORT with OSNet
+# Yolov7 + StrongSORT + KML file
 
 
 

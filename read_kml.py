@@ -5,7 +5,7 @@ import fiona
 
 
 def complete_kml(df, frames):
-    short_df = df.loc[:, ('Name', 'Latitude', 'Longitude')]  # Se saca la info importante
+    short_df = df.loc[:, ('Name', 'Latitude', 'Longitude', 'Altitude')]  # Se saca la info importante
     short_df['Name'] = short_df['Name'].astype(int)  # Se pasa de str a int
     prev_stop = 0  #
     new_df = short_df.iloc[:0]  # DF base

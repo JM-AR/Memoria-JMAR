@@ -46,3 +46,5 @@ imageio
 # KML --------------------------------------
 geopandas==0.10.2
 Fiona==1.8.22
+geopy
+openpyxl

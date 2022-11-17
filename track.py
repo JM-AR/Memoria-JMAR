@@ -9,6 +9,7 @@ from numpy import random
 import pandas as pd
 import geopandas as gpd
 import fiona
+from geopy import distance
 import os
 
 from yolov7.models.experimental import attempt_load
@@ -23,7 +24,6 @@ from read_kml import complete_kml
 
 import warnings
 warnings.filterwarnings("ignore")
-
 
 # limit the number of cpus used by high performance libraries
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -85,6 +85,7 @@ def run(
         dnn=False,  # use OpenCV DNN for ONNX inference
         kml_path='file.kml',  # Archivo kml a analizar
 ):
+
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in VID_FORMATS
@@ -126,6 +127,7 @@ def run(
         nr_sources = 1
     vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
 
+
     # initialize StrongSORT
     cfg = get_config()
     cfg.merge_from_file(config_strongsort)
@@ -156,11 +158,30 @@ def run(
 
     # initiate KML file reading
     gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-    geo_df = gpd.read_file(kml_path, driver='KML')
-    df = pd.DataFrame(geo_df)
+    geopd_df = gpd.read_file(kml_path, driver='KML')
+    geo_df = pd.DataFrame(geopd_df)
 
-    cols = ['ID_Frame', 'ID_Objeto','Dist Met', 'Clase', 'Latitud', 'Longitud', 'confidence']
-    df_out = pd.DataFrame(columns=cols) #To add a row -> df_out.loc[len(df_out)] = Row_in en formato lista
+    # Extract latitude and longitude from the KML geometry column
+    geo_df['Latitude'] = geo_df.geometry.apply(lambda p: p.y)
+    geo_df['Longitude'] = geo_df.geometry.apply(lambda p: p.x)
+    geo_df['Altitude'] = geo_df.geometry.apply(lambda p: p.z)
+
+    # Create the completed DF of the KML file
+    complete_df = complete_kml(geo_df, dataset.nframes)
+
+    # Creación de distancias
+    dist_rec = []
+    past_lat = complete_df.Latitude[0]
+    past_long = complete_df.Longitude[0]
+    past_alt = complete_df.Altitude[0]
+    past_point = [past_lat, past_long, past_alt]
+    past_dist = 0
+
+    # Create dictionaries to retrieve info based on item IDs
+
+    dict_frame = {}
+    dict_class = {}
+    dict_confidence = {}
 
     # Run tracking
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0      # Diferencia temporal en etapas y elementos vistos por img
@@ -169,6 +190,7 @@ def run(
     # im -> frame reshaped a 3,640,640
     # im0s -> frame original 3,1280,1280
     # vid_cap -> no idea
+
     for frame_idx, (path, im, im0s, vid_cap) in enumerate(dataset):
         s = ''
         t1 = time_synchronized()
@@ -176,7 +198,7 @@ def run(
         im = im.half() if half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0 - 255 to 0.0 - 1.0
         if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim -> se pasa de 3,640,640 a 1,3,640,640
+            im = im[None]  # expand for batch dim -> se pasa de 3x640x640 a 1x3x640x640
 
         t2 = time_synchronized()
         dt[0] += t2 - t1
@@ -244,15 +266,27 @@ def run(
                 t5 = time_synchronized()
                 dt[3] += t5 - t4
 
-                print([[frame_idx+1, tracks.track_id, tracks.class_id.item(), tracks.conf.item()] for tracks in strongsort_list[i].tracker.tracks if tracks.is_confirmed()])
-
-                # draw boxes for visualization
+                # draw boxes for visualization and save info
                 if len(outputs[i]) > 0:
+                    #print([[frame_idx + 1, tracks.track_id, tracks.class_id.item(), tracks.conf.item()] for tracks in
+                           #strongsort_list[i].tracker.tracks if tracks.is_confirmed()])
+
                     for j, (output, conf) in enumerate(zip(outputs[i], confs)):  # (output[6]==conf) No change, it works
 
                         bboxes = output[0:4]
-                        id = output[4]
-                        cls = output[5]
+                        id = int(output[4])
+                        cls = int(output[5])
+                        conf = round(conf.item(), 2)
+
+                        # Get info into the dictionaries
+
+                        dict_frame.setdefault(str(id), [])      # frames
+                        dict_frame[str(id)].append(frame_idx + 1)
+
+                        dict_class.setdefault(str(id), names[cls])  # classes
+
+                        dict_confidence.setdefault(str(id), []) # confidence
+                        dict_confidence[str(id)].append(conf)
 
                         if save_txt:
                             # to MOT format
@@ -266,10 +300,10 @@ def run(
                                                                bbox_top, bbox_w, bbox_h, -1, -1, -1, i))
 
                         if save_vid or save_crop or show_vid:  # Add bbox to image
-                            c = int(cls)  # integer class
-                            id = int(id)  # integer id
-                            label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
-                                (f'{id} {conf:.2f}' if hide_class else f'{id} {names[c]} {conf:.2f}'))
+
+                            label = None if hide_labels else (f'{id} {names[cls]}' if hide_conf else \
+                                (f'{id} {conf:.2f}' if hide_class else f'{id} {names[cls]} {conf:.2f}'))
+
                             plot_one_box(bboxes, im0, label=label, color=colors[int(cls)], line_thickness=2)
 
                             #if save_crop:
@@ -304,6 +338,48 @@ def run(
                 vid_writer[i].write(im0)
 
             prev_frames[i] = curr_frames[i]
+
+        # Update curr location
+        curr_lat = complete_df.Latitude[frame_idx]
+        curr_long = complete_df.Longitude[frame_idx]
+        curr_alt = complete_df.Altitude[frame_idx]
+        curr_point = [curr_lat, curr_long, curr_alt]
+
+        # Calculate distance traveled
+        distance_2d = distance.distance(past_point[:2], curr_point[:2]).m
+        distance_3d = np.sqrt(distance_2d ** 2 + (past_point[2] - curr_point[2]) ** 2)
+        dist_rec.append(distance_3d + past_dist)
+
+        # Update past location
+        past_lat = complete_df.Latitude[frame_idx]
+        past_long = complete_df.Longitude[frame_idx]
+        past_alt = complete_df.Altitude[frame_idx]
+        past_dist = distance_3d + past_dist
+        past_point = [past_lat, past_long, past_alt]
+
+    # Create DF
+
+    cols = ['ID_Objeto', 'ID_Fotograma', 'Dist Met (Km)', 'Clase', 'Max seguridad', 'Min seguridad', 'Latitud', 'Longitud']
+    df_out = pd.DataFrame(columns=cols)  # To add a row -> df_out.loc[len(df_out)] = Row_in en formato lista
+
+    IDS = dict_class.keys()
+    for id_obj in IDS:
+        clase = dict_class[id_obj]
+        max_conf = max(dict_confidence[id_obj])
+        min_conf = min(dict_confidence[id_obj])
+        idx_max_conf = dict_confidence[id_obj].index(max_conf)
+        id_frame = dict_frame[id_obj][idx_max_conf]  # los frames fueron agregados con frm_idx + 1
+        last_frame = dict_frame[id_obj][-1] # for Lat and Long
+        lat = complete_df.iloc[last_frame-1].Latitude
+        long = complete_df.iloc[last_frame-1].Longitude
+        trav_dist = round(dist_rec[last_frame-1]/1000, 4)
+
+        # Save info in DF
+        row_list = [int(id_obj), id_frame, trav_dist, clase, max_conf, min_conf, lat, long]
+        df_out.loc[len(df_out)] = row_list
+
+    name = os.path.basename(path).split('.')[0]
+    df_out.to_excel(name + '.xlsx')
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image

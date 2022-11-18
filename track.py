@@ -23,6 +23,7 @@ from strong_sort.strong_sort import StrongSORT
 from read_kml import complete_kml
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 # limit the number of cpus used by high performance libraries
@@ -31,7 +32,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 strongsort root directory
@@ -47,7 +47,6 @@ if str(ROOT / 'strong_sort') not in sys.path:
     sys.path.append(str(ROOT / 'strong_sort'))  # add strong_sort ROOT to PATH
 
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
 
 VID_FORMATS = ('asf', 'avi', 'gif', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ts', 'wmv')  # include video suffixes
 
@@ -74,8 +73,8 @@ def run(
         augment=False,  # augmented inference
         visualize=False,  # visualize features
         update=False,  # update all models
-        project=ROOT / 'runs/track',  # save results to project/name
-        name='exp',  # save results to project/name
+        project=ROOT / 'Outputs',  # save results to project/name
+        name='run',  # save results to project/name
         exist_ok=False,  # existing project/name ok, do not increment
         line_thickness=2,  # bounding box thickness (pixels)
         hide_labels=False,  # hide labels
@@ -83,9 +82,8 @@ def run(
         hide_class=False,  # hide IDs
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
-        kml_path='file.kml',  # Archivo kml a analizar
+        kml_path='demo.kml',  # Archivo kml a analizar
 ):
-
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in VID_FORMATS
@@ -95,6 +93,9 @@ def run(
         source = check_file(source)  # download
 
     # Directories
+    name_path = os.path.basename(kml_path).split('.')[0]
+    project = project / name_path
+
     if not isinstance(yolo_weights, list):  # single yolo model
         exp_name = yolo_weights.stem
     elif type(yolo_weights) is list and len(yolo_weights) == 1:  # single models after --yolo_weights
@@ -126,7 +127,6 @@ def run(
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
         nr_sources = 1
     vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
-
 
     # initialize StrongSORT
     cfg = get_config()
@@ -182,16 +182,20 @@ def run(
     dict_frame = {}
     dict_class = {}
     dict_confidence = {}
+    dict_imgs = {}
+    dict_plots = {}
 
     # Run tracking
-    dt, seen = [0.0, 0.0, 0.0, 0.0], 0      # Diferencia temporal en etapas y elementos vistos por img
+    dt, seen = [0.0, 0.0, 0.0, 0.0], 0  # Diferencia temporal en etapas y elementos vistos por img
     curr_frames, prev_frames = [None] * nr_sources, [None] * nr_sources
+
     # path -> video location
     # im -> frame reshaped a 3,640,640
     # im0s -> frame original 3,1280,1280
     # vid_cap -> no idea
-
     for frame_idx, (path, im, im0s, vid_cap) in enumerate(dataset):
+
+        dict_imgs.setdefault(frame_idx + 1, im0s.copy())  #
         s = ''
         t1 = time_synchronized()
         im = torch.from_numpy(im).to(device)
@@ -240,7 +244,7 @@ def run(
 
             curr_frames[i] = im0
 
-            txt_path = str(save_dir / 'tracks' / txt_file_name) # im.txt
+            txt_path = str(save_dir / 'tracks' / txt_file_name)  # im.txt
             s += '%gx%g ' % im.shape[2:]  # print string
             imc = im0.copy() if save_crop else im0  # for save_crop
 
@@ -249,6 +253,7 @@ def run(
 
             if det is not None and len(det):
                 # Rescale boxes from img_size to im0 size
+                det_og = det[:, :4].round()
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
@@ -268,11 +273,12 @@ def run(
 
                 # draw boxes for visualization and save info
                 if len(outputs[i]) > 0:
-                    #print([[frame_idx + 1, tracks.track_id, tracks.class_id.item(), tracks.conf.item()] for tracks in
-                           #strongsort_list[i].tracker.tracks if tracks.is_confirmed()])
+                    # print([[frame_idx + 1, tracks.track_id, tracks.class_id.item(), tracks.conf.item()] for tracks in
+                    # strongsort_list[i].tracker.tracks if tracks.is_confirmed()])
 
                     for j, (output, conf) in enumerate(zip(outputs[i], confs)):  # (output[6]==conf) No change, it works
 
+                        bboxes_og = det[j,0:4]
                         bboxes = output[0:4]
                         id = int(output[4])
                         cls = int(output[5])
@@ -280,13 +286,16 @@ def run(
 
                         # Get info into the dictionaries
 
-                        dict_frame.setdefault(str(id), [])      # frames
+                        dict_frame.setdefault(str(id), [])  # frames
                         dict_frame[str(id)].append(frame_idx + 1)
 
                         dict_class.setdefault(str(id), names[cls])  # classes
 
-                        dict_confidence.setdefault(str(id), []) # confidence
+                        dict_confidence.setdefault(str(id), [])  # confidence
                         dict_confidence[str(id)].append(conf)
+
+                        dict_plots.setdefault(str(id), [])  # guardado de bbox de objetos detectados
+                        dict_plots[str(id)].append(bboxes)
 
                         if save_txt:
                             # to MOT format
@@ -302,13 +311,14 @@ def run(
                         if save_vid or save_crop or show_vid:  # Add bbox to image
 
                             label = None if hide_labels else (f'{id} {names[cls]}' if hide_conf else \
-                                (f'{id} {conf:.2f}' if hide_class else f'{id} {names[cls]} {conf:.2f}'))
+                                                                  (
+                                                                      f'{id} {conf:.2f}' if hide_class else f'{id} {names[cls]} {conf:.2f}'))
 
                             plot_one_box(bboxes, im0, label=label, color=colors[int(cls)], line_thickness=2)
 
-                            #if save_crop:
-                                # txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
-                                # save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)}
+                            # if save_crop:
+                            # txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
+                            # save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)}
 
                 print(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
 
@@ -357,33 +367,50 @@ def run(
         past_dist = distance_3d + past_dist
         past_point = [past_lat, past_long, past_alt]
 
-    # Create DF
+    # Create directory for images
+    if not os.path.isdir(save_dir / 'Imgs'):
+        # not present then create it.
+        os.makedirs(save_dir / 'Imgs')
 
-    cols = ['ID_Objeto', 'ID_Fotograma', 'Dist Met (Km)', 'Clase', 'Max seguridad', 'Min seguridad', 'Latitud', 'Longitud']
+    # Create DF
+    cols = ['ID_Objeto', 'ID_Fotograma', 'Dist Met (Km)', 'Clase', 'Max seguridad', 'Min seguridad', 'Latitud',
+            'Longitud']
     df_out = pd.DataFrame(columns=cols)  # To add a row -> df_out.loc[len(df_out)] = Row_in en formato lista
 
     IDS = dict_class.keys()
     for id_obj in IDS:
-        clase = dict_class[id_obj]
+        clase = dict_class[id_obj]  # clase del id_obj
         max_conf = max(dict_confidence[id_obj])
         min_conf = min(dict_confidence[id_obj])
-        idx_max_conf = dict_confidence[id_obj].index(max_conf)
-        id_frame = dict_frame[id_obj][idx_max_conf]  # los frames fueron agregados con frm_idx + 1
-        last_frame = dict_frame[id_obj][-1] # for Lat and Long
-        lat = complete_df.iloc[last_frame-1].Latitude
-        long = complete_df.iloc[last_frame-1].Longitude
-        trav_dist = round(dist_rec[last_frame-1]/1000, 4)
+        idx_max_conf = dict_confidence[id_obj].index(max_conf)  # índice de max conf
+        id_frame = dict_frame[id_obj][idx_max_conf]  # frame con el max conf, guardado como (idx_frame + 1)
+        last_frame = dict_frame[id_obj][-1]  # última vista del objeto para Lat and Long
+        lat = complete_df.iloc[last_frame - 1].Latitude
+        long = complete_df.iloc[last_frame - 1].Longitude
+        trav_dist = round(dist_rec[last_frame - 1] / 1000, 4)
 
         # Save info in DF
         row_list = [int(id_obj), id_frame, trav_dist, clase, max_conf, min_conf, lat, long]
         df_out.loc[len(df_out)] = row_list
 
-    name = os.path.basename(path).split('.')[0]
-    df_out.to_excel(name + '.xlsx')
+        # Save imgs
+        bb = dict_plots[id_obj][idx_max_conf]  # bounding box del obj con mayor conf
+        img_2save = dict_imgs[id_frame]  # img del frame con mayor conf
+
+        label = f'{id_obj} {clase} {max_conf:.2f}'
+
+        plot_one_box(bb, img_2save, label=label, color=[255, 0, 255], line_thickness=3)
+
+        file_name = f'{id_obj}_ID.jpg'
+        img_path = save_dir / 'Imgs' / file_name
+        cv2.imwrite(str(img_path), img_2save)
+
+    df_out.to_excel(save_dir / f'{name}.xlsx')
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
-    print(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms strong sort update per image at shape {(1, 3, imgsz, imgsz)}' % t)
+    print(
+        f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms strong sort update per image at shape {(1, 3, imgsz, imgsz)}' % t)
     if save_txt or save_vid:
         s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
         print(f"Results saved to {colorstr('bold', save_dir)}{s}")
@@ -396,7 +423,7 @@ def parse_opt():
     parser.add_argument('--yolo-weights', nargs='+', type=str, default=WEIGHTS / 'best.pt', help='model.pt path(s)')
     parser.add_argument('--strong-sort-weights', type=str, default=WEIGHTS / 'osnet_x0_25_msmt17.pt')
     parser.add_argument('--config-strongsort', type=str, default='strong_sort/configs/strong_sort.yaml')
-    parser.add_argument('--source', type=str, default='trim.avi', help='file/dir/URL/glob, 0 for webcam')
+    parser.add_argument('--source', type=str, default='demo.avi', help='file/dir/URL/glob, 0 for webcam')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
@@ -406,7 +433,7 @@ def parse_opt():
     parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
-    parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
+    parser.add_argument('--save-vid', action='store_false', help='save video tracking results')
     parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
     # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
@@ -414,8 +441,8 @@ def parse_opt():
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
     parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
-    parser.add_argument('--name', default='exp', help='save results to project/name')
+    parser.add_argument('--project', default=ROOT / 'Outputs', help='save results to project/name')
+    parser.add_argument('--name', default='run', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
     parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
@@ -423,8 +450,7 @@ def parse_opt():
     parser.add_argument('--hide-class', default=False, action='store_true', help='hide IDs')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-
-    parser.add_argument('--kml-path', type=str, default='file.kml', help='path archivo kml')
+    parser.add_argument('--kml-path', type=str, default='demo.kml', help='path archivo kml')
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand

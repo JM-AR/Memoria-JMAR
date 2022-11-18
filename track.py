@@ -20,7 +20,7 @@ from yolov7.utils.torch_utils import select_device, time_synchronized
 from yolov7.utils.plots import plot_one_box
 from strong_sort.utils.parser import get_config
 from strong_sort.strong_sort import StrongSORT
-from read_kml import complete_kml
+from complete_data.utils import complete_kml, complete_vid
 
 import warnings
 
@@ -83,6 +83,7 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         kml_path='demo.kml',  # Archivo kml a analizar
+        square_img_size= 1280,
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -117,14 +118,17 @@ def run(
     stride = model.stride.max()  # model stride
     imgsz = check_img_size(imgsz[0], s=stride.cpu().numpy())  # check image size
 
+    # Check Video
+    del_vid_path = complete_vid(source, save_dir, square_img_size)
+
     # Dataloader
     if webcam:
         show_vid = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride.cpu().numpy())
+        dataset = LoadStreams(del_vid_path, img_size=imgsz, stride=stride.cpu().numpy())
         nr_sources = 1
     else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride)
+        dataset = LoadImages(del_vid_path, img_size=imgsz, stride=stride)
         nr_sources = 1
     vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
 
@@ -228,7 +232,7 @@ def run(
                 p = Path(p)  # to Path
                 s += f'{i}: '
                 txt_file_name = p.name
-                save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+                save_path = str(save_dir / source)  # im.jpg, vid.mp4, ...
 
             else:
                 p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
@@ -236,11 +240,11 @@ def run(
                 # video file
                 if source.endswith(VID_FORMATS):
                     txt_file_name = p.stem
-                    save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+                    save_path = str(save_dir / source)  # im.jpg, vid.mp4, ...
                 # folder with imgs
                 else:
                     txt_file_name = p.parent.name  # get folder name containing current img
-                    save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+                    save_path = str(save_dir / source)  # im.jpg, vid.mp4, ...
 
             curr_frames[i] = im0
 
@@ -405,7 +409,8 @@ def run(
         img_path = save_dir / 'Imgs' / file_name
         cv2.imwrite(str(img_path), img_2save)
 
-    df_out.to_excel(save_dir / f'{name}.xlsx')
+    df_out.to_excel(save_dir / f'{name_path}.xlsx')
+    os.remove(del_vid_path)
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
@@ -451,6 +456,7 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--kml-path', type=str, default='demo.kml', help='path archivo kml')
+    parser.add_argument('--square-img-size', type=int, default=1280, help='tamaño de outputs cuadrados')
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
